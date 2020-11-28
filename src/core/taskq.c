@@ -247,7 +247,8 @@ nni_taskq_sys_init(void)
 		nthrs = NNG_MAX_TASKQ_THREADS;
 	}
 #endif
-
+    printf("%s:%d, nthrs=%d\n", __FILE__, __LINE__, nthrs);
+    sleep(5);
 	return (nni_taskq_init(&nni_taskq_systq, nthrs));
 }
 

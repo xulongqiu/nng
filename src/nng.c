@@ -395,24 +395,33 @@ nng_listen(nng_socket sid, const char *addr, nng_listener *lp, int flags)
 	nni_sock *    s;
 	nni_listener *l;
 
+    printf("%s:%d\n", __FILE__, __LINE__);
 	if ((rv = nni_sock_find(&s, sid.id)) != 0) {
 		return (rv);
 	}
+    printf("%s:%d\n", __FILE__, __LINE__);
 	if ((rv = nni_listener_create(&l, s, addr)) != 0) {
 		nni_sock_rele(s);
 		return (rv);
 	}
+    printf("%s:%d\n", __FILE__, __LINE__);
+    sleep(5);
+    printf("%s:%d\n", __FILE__, __LINE__);
 	if ((rv = nni_listener_start(l, flags)) != 0) {
 		nni_listener_close(l);
 		nni_sock_rele(s);
 		return (rv);
 	}
 
+    printf("%s:%d\n", __FILE__, __LINE__);
+    sleep(3);
+
 	if (lp != NULL) {
 		nng_listener lid;
 		lid.id = nni_listener_id(l);
 		*lp    = lid;
 	}
+    printf("%s:%d\n", __FILE__, __LINE__);
 	nni_listener_rele(l);
 	nni_sock_rele(s);
 	return (rv);
