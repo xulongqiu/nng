@@ -44,14 +44,14 @@ endif
 SOURCE_MAIN_PATH = src
 
 CFLAGS +=  -I include -I src \
-		   -DNNG_HAVE_GETRANDOM \
 		   -DNNG_PLATFORM_POSIX \
 		   -DNNG_SETSTACKSIZE \
-		   -DNNG_USE_PIPE \
-		   -DNNG_USE_EPOLL \
-		   -DNNG_HAVE_POLL \
+		   -DNNG_HAVE_EVENTFD \
+		   -DNNG_HAVE_EPOLL \
+		   -DNNG_HAVE_EPOLL_CREATE1 \
 		   -DNNG_HAVE_MSG_CONTROL \
-		   -DNNG_ENABLE_STATS
+		   -DNNG_ENABLE_STATS \
+		   -DNNG_RESOLV_CONCURRENCY=1
 
 #network
 #CFLAGS +=  -DNNG_SUPP_TLS \
@@ -104,7 +104,8 @@ CSRCS = $(shell find $(ALL_SUBDIR) -name "*.c" -a ! -name "*_test.c" -maxdepth 1
 
 
 ifeq ($(CONFIG_NNG_DEMO),y)
-MAINSRC = demo/reqrep/reqrep.c
+CSRCS += demo/nuttx/nxipc.c
+MAINSRC = demo/nuttx/nuttx_media.c
 endif
 
 include $(APPDIR)/Application.mk

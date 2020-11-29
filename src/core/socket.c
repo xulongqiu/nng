@@ -622,13 +622,11 @@ nni_sock_open(nni_sock **sockp, const nni_proto *proto)
 		return (NNG_ENOTSUP);
 	}
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	if (((rv = nni_init()) != 0) ||
 	    ((rv = nni_sock_create(&s, proto)) != 0)) {
 		return (rv);
 	}
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	nni_mtx_lock(&sock_lk);
 	if (nni_idhash_alloc32(sock_hash, &s->s_id, s) != 0) {
 		sock_destroy(s);
@@ -647,7 +645,6 @@ nni_sock_open(nni_sock **sockp, const nni_proto *proto)
 	nni_stat_set_value(&s->s_stats.s_id, s->s_id);
 
 	// Add our stats chain.
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	nni_stat_register(&s->s_stats.s_root);
 
 	return (0);

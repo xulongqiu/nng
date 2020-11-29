@@ -9,7 +9,6 @@
 //
 
 #include <string.h>
-#include <stdio.h>
 
 #include "core/nng_impl.h"
 
@@ -30,7 +29,6 @@ nni_proto_init(const nni_proto *proto)
 	nni_protocol *p;
 	int           rv;
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	nni_mtx_lock(&nni_proto_lk);
 	NNI_LIST_FOREACH (&nni_proto_list, p) {
 		if (p->p_proto == proto) {
@@ -38,12 +36,10 @@ nni_proto_init(const nni_proto *proto)
 			return (0);
 		}
 	}
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	if ((p = NNI_ALLOC_STRUCT(p)) == NULL) {
 		nni_mtx_unlock(&nni_proto_lk);
 		return (NNG_ENOMEM);
 	}
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	NNI_LIST_NODE_INIT(&p->p_link);
 	p->p_proto = proto;
 	if ((proto->proto_init != NULL) && ((rv = proto->proto_init()) != 0)) {
@@ -51,7 +47,6 @@ nni_proto_init(const nni_proto *proto)
 		nni_mtx_unlock(&nni_proto_lk);
 		return (rv);
 	}
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	nni_list_append(&nni_proto_list, p);
 	nni_mtx_unlock(&nni_proto_lk);
 	return (0);
@@ -62,18 +57,14 @@ nni_proto_open(nng_socket *sockidp, const nni_proto *proto)
 {
 	int       rv;
 	nni_sock *sock;
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	if (((rv = nni_init()) != 0) || ((rv = nni_proto_init(proto)) != 0)) {
 		return (rv);
 	}
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	if ((rv = nni_sock_open(&sock, proto)) == 0) {
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 		nng_socket s;
 		s.id     = nni_sock_id(sock); // Keep socket held open.
 		*sockidp = s;
 	}
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	return (rv);
 }
 

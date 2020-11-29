@@ -9,7 +9,6 @@
 //
 
 // POSIX threads.
-#include <stdio.h>
 #include "core/nng_impl.h"
 
 #ifdef NNG_PLATFORM_POSIX
@@ -264,23 +263,19 @@ nni_plat_init(int (*helper)(void))
 {
 	int rv;
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	if (nni_plat_forked) {
 		nni_panic("nng is not fork-reentrant safe");
 	}
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	if (nni_plat_inited) {
 		return (0); // fast path
 	}
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	pthread_mutex_lock(&nni_plat_init_lock);
 	if (nni_plat_inited) { // check again under the lock to be sure
 		pthread_mutex_unlock(&nni_plat_init_lock);
 		return (0);
 	}
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	if ((pthread_mutexattr_init(&nni_mxattr) != 0) ||
 	    (pthread_condattr_init(&nni_cvattr) != 0) ||
 	    (pthread_attr_init(&nni_thrattr) != 0)) {
@@ -290,7 +285,6 @@ nni_plat_init(int (*helper)(void))
 		return (NNG_ENOMEM);
 	}
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 #if !defined(NNG_USE_GETTIMEOFDAY) && NNG_USE_CLOCKID != CLOCK_REALTIME
 	if (pthread_condattr_setclock(&nni_cvattr, NNG_USE_CLOCKID) != 0) {
 		pthread_mutex_unlock(&nni_plat_init_lock);
@@ -300,10 +294,8 @@ nni_plat_init(int (*helper)(void))
 		return (NNG_ENOMEM);
 	}
 #endif
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 
 #if defined(NNG_SETSTACKSIZE)
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	struct rlimit rl;
 	if ((getrlimit(RLIMIT_STACK, &rl) == 0) &&
 	    (rl.rlim_cur != RLIM_INFINITY) &&
@@ -317,7 +309,6 @@ nni_plat_init(int (*helper)(void))
 	}
 #endif
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 	// if this one fails we don't care.
 	(void) pthread_mutexattr_settype(
 	    &nni_mxattr, PTHREAD_MUTEX_ERRORCHECK);
@@ -330,7 +321,7 @@ nni_plat_init(int (*helper)(void))
 		return (rv);
 	}
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
+#ifdef NNG_USE_POSIX_RESOLV_GAI
 	if ((rv = nni_posix_resolv_sysinit()) != 0) {
 		pthread_mutex_unlock(&nni_plat_init_lock);
 		nni_posix_pollq_sysfini();
@@ -339,12 +330,13 @@ nni_plat_init(int (*helper)(void))
 		pthread_attr_destroy(&nni_thrattr);
 		return (rv);
 	}
-
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
+#endif
 #ifndef __NuttX__
 	if (pthread_atfork(NULL, NULL, nni_atfork_child) != 0) {
 		pthread_mutex_unlock(&nni_plat_init_lock);
+#ifdef NNG_USE_POSIX_RESOLV_GAI
 		nni_posix_resolv_sysfini();
+#endif
 		nni_posix_pollq_sysfini();
 		pthread_mutexattr_destroy(&nni_mxattr);
 		pthread_condattr_destroy(&nni_cvattr);
@@ -353,7 +345,6 @@ nni_plat_init(int (*helper)(void))
 	}
 #endif
 
-    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
 
 	if ((rv = helper()) == 0) {
 		nni_plat_inited = 1;
@@ -368,7 +359,9 @@ nni_plat_fini(void)
 {
 	pthread_mutex_lock(&nni_plat_init_lock);
 	if (nni_plat_inited) {
+#ifdef NNG_USE_POSIX_RESOLV_GAI
 		nni_posix_resolv_sysfini();
+#endif
 		nni_posix_pollq_sysfini();
 		pthread_mutexattr_destroy(&nni_mxattr);
 		pthread_condattr_destroy(&nni_cvattr);

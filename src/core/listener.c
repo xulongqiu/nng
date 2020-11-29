@@ -168,19 +168,16 @@ nni_listener_create(nni_listener **lp, nni_sock *s, const char *url_str)
 	if ((rv = nni_url_parse(&url, url_str)) != 0) {
 		return (rv);
 	}
-    printf("%s:%d\n", __FILE__, __LINE__);
 	if (((tran = nni_tran_find(url)) == NULL) ||
 	    (tran->tran_listener == NULL)) {
 		nni_url_free(url);
 		return (NNG_ENOTSUP);
 	}
 
-    printf("%s:%d\n", __FILE__, __LINE__);
 	if ((l = NNI_ALLOC_STRUCT(l)) == NULL) {
 		nni_url_free(url);
 		return (NNG_ENOMEM);
 	}
-    printf("%s:%d\n", __FILE__, __LINE__);
 	l->l_url     = url;
 	l->l_closed  = false;
 	l->l_closing = false;
@@ -190,7 +187,6 @@ nni_listener_create(nni_listener **lp, nni_sock *s, const char *url_str)
 	l->l_tran    = tran;
 	nni_atomic_flag_reset(&l->l_started);
 
-    printf("%s:%d\n", __FILE__, __LINE__);
 	// Make a copy of the endpoint operations.  This allows us to
 	// modify them (to override NULLs for example), and avoids an extra
 	// dereference on hot paths.
@@ -200,7 +196,6 @@ nni_listener_create(nni_listener **lp, nni_sock *s, const char *url_str)
 	NNI_LIST_INIT(&l->l_pipes, nni_pipe, p_ep_node);
 	listener_stats_init(l);
 
-    printf("%s:%d\n", __FILE__, __LINE__);
 	if (((rv = nni_aio_alloc(&l->l_acc_aio, listener_accept_cb, l)) != 0) ||
 	    ((rv = nni_aio_alloc(&l->l_tmo_aio, listener_timer_cb, l)) != 0) ||
 	    ((rv = l->l_ops.l_init(&l->l_data, url, l)) != 0) ||
@@ -210,14 +205,12 @@ nni_listener_create(nni_listener **lp, nni_sock *s, const char *url_str)
 		return (rv);
 	}
 
-    printf("%s:%d\n", __FILE__, __LINE__);
 	// Update a few stat bits, and register them.
 	snprintf(l->l_stats.s_scope, sizeof(l->l_stats.s_scope), "listener%u",
 	    l->l_id);
 	nni_stat_set_value(&l->l_stats.s_id, l->l_id);
 	nni_stat_register(&l->l_stats.s_root);
 
-    printf("%s:%d\n", __FILE__, __LINE__);
 	*lp = l;
 	return (0);
 }
