@@ -92,16 +92,10 @@ cflags.NNG_TRANSPORT_ZEROTIER := src/transport/zerotier
 	NNG_TRANSPORT_INPROC NNG_TRANSPORT_IPC NNG_TRANSPORT_TCP \
 	NNG_TRANSPORT_WSS NNG_TRANSPORT_TLS NNG_TRANSPORT_ZEROTIER
 
-#CONFIG_NNG_DEFINES := NNG_PLATFORM_POSIX NNG_PROTOCOL_REQREP NNG_PROTOCOL_PUBSUB NNG_TRANSPORT_INPROC
-
 CFLAGS += $(foreach flag, $(shell echo $(CONFIG_NNG_DEFINES)), -D${flag})
 ALL_SUBDIR += $(foreach flag, $(shell echo $(CONFIG_NNG_DEFINES)), ${cflags.${flag}})
 
-#$(info $(ALL_SUBDIR))
-#$(error $(CFLAGS))
-
 CSRCS = $(shell find $(ALL_SUBDIR) -name "*.c" -a ! -name "*_test.c" -maxdepth 1)
-
 
 ifeq ($(CONFIG_NNG_DEMO),y)
 CSRCS += demo/nuttx/nxipc.c

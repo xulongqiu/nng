@@ -206,6 +206,7 @@ static void* player_worker(void* arg) {
     }
 
     media_log("%s.%s.cnt=%d\n", __func__, player->name, cnt);
+    return NULL;
 }
 
 static int media_client_start(player_t client[], const int cnt)
@@ -224,10 +225,12 @@ static int media_client_start(player_t client[], const int cnt)
 
 static void inline media_player_destroy(player_t *player) {
     player->interrupted = true;
+    media_log("%s.%s.enter\n", __func__, player->name);
     pthread_join(player->tid, NULL);
     nxipc_client_disconnect(player->server_proxy);
     nxipc_sub_unregister_topic(player->cb_proxy, player->name, strlen(player->name));
     nxipc_sub_disconnect(player->cb_proxy);
+    media_log("%s.%s.exit\n", __func__, player->name);
 }
 
 static int media_client_stop(player_t client[], const int cnt) {

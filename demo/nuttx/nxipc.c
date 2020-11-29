@@ -97,7 +97,6 @@ static void* nng_server_worker(void* arg)
     nng_trans_hdr_t* trans_hdr;
     nxipc_trans_data_t trans_data;
     nng_server_ctx_t* ctx = (nng_server_ctx_t*)arg;
-    pthread_detach(pthread_self());
 
     if (NULL == ctx) {
         return NULL;
@@ -105,7 +104,7 @@ static void* nng_server_worker(void* arg)
 
     prctl(PR_SET_NAME, strstr(ctx->name, "//") + 2, NULL, NULL, NULL);
 
-    while (1) {
+    while (ctx->actived) {
         int rc;
         nng_msg* msg = NULL;
         void* body   = NULL;
@@ -120,6 +119,14 @@ static void* nng_server_worker(void* arg)
                 //TODO timeout or others
                 break;
             }
+        }
+
+        if (msg == NULL) {
+            if (!ctx->actived) {
+                nxipc_log("%s: msg=null, actived=false\n", __func__);
+            }
+
+            continue;
         }
 
         body = nng_msg_body(msg);
@@ -215,6 +222,9 @@ void* nxipc_server_create(const char* name)
         goto err;
     }
 
+    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, 100);
+    nng_setopt_ms(ctx->fd, NNG_OPT_SENDTIMEO, 100);
+
     ctx->actived = true;
     ret = pthread_create(&ctx->tid, NULL, nng_server_worker, (void*)ctx);
 
@@ -252,10 +262,8 @@ int nxipc_server_release(void* nng_server_ctx)
     if (nng_server_ctx != NULL) {
         nng_server_ctx_t* ctx = (nng_server_ctx_t*)nng_server_ctx;
         ctx->actived = false;
-
-        nng_close(ctx->fd);
-
         pthread_join(ctx->tid, NULL);
+        nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
             free(ctx->name);
@@ -303,6 +311,9 @@ void* nxipc_client_connect(const char* server_name)
     if ((ret = nng_dial(ctx->fd, ctx->name, NULL, 0)) != 0) {
         goto err;
     }
+
+    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, 100);
+    nng_setopt_ms(ctx->fd, NNG_OPT_SENDTIMEO, 100);
 
     return ctx;
 
@@ -374,8 +385,8 @@ int nxipc_client_transaction(const void* nng_client_ctx, int op_code, const void
 
     ret = nng_recvmsg(ctx->fd, &msg, 0);
 
-    if (ret < 0) {
-        nxipc_log("client_recv: %s\n", nng_strerror(ret));
+    if (ret < 0 || msg == NULL) {
+        nxipc_log("client_recv.ret=%s, msg=%p\n", nng_strerror(ret), msg);
         goto out;
     }
 
@@ -508,7 +519,6 @@ int nxipc_pub_topic_msg(void* nng_pub_ctx, const void* topic, size_t topic_len, 
 static void* nng_sub_worker(void* arg)
 {
     nng_sub_ctx_t* ctx = (nng_sub_ctx_t*)arg;
-    pthread_detach(pthread_self());
 
     if (NULL == ctx) {
         return NULL;
@@ -516,7 +526,7 @@ static void* nng_sub_worker(void* arg)
 
     prctl(PR_SET_NAME, strstr(ctx->name, "//") + 2, NULL, NULL, NULL);
 
-    while (1) {
+    while (ctx->actived) {
         int rc;
         nng_msg* msg = NULL;
         nng_nuttx_topic_t* topic;
@@ -532,6 +542,14 @@ static void* nng_sub_worker(void* arg)
                 //TODO timeout or others
                 break;
             }
+        }
+
+        if (msg == NULL) {
+            if (!ctx->actived) {
+                nxipc_log("%s: msg=null, actived=false\n", __func__);
+            }
+
+            continue;
         }
 
         topic = (nng_nuttx_topic_t*)nng_msg_body(msg);
@@ -590,13 +608,15 @@ void* nxipc_sub_connect(const char* name, on_topic_listener listener, void* list
         goto err;
     }
 
+    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, 100);
+
     if (ret < 0) {
         goto err;
     }
 
     ctx->listener = listener;
     ctx->priv = listener_priv;
-
+    ctx->actived = true;
     ret = pthread_create(&ctx->tid, NULL, nng_sub_worker, (void*)ctx);
 
     if (0 == ret) {
@@ -625,8 +645,8 @@ void nxipc_sub_disconnect(void* nng_sub_ctx)
         nng_sub_ctx_t* ctx = (nng_sub_ctx_t*)nng_sub_ctx;
         ctx->actived = false;
 
-        nng_close(ctx->fd);
         pthread_join(ctx->tid, NULL);
+        nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
             free(ctx->name);
