@@ -43,7 +43,7 @@ endif
 
 SOURCE_MAIN_PATH = src
 
-CFLAGS +=  -I include -I src \
+CFLAGS +=  -I include -I src -I src/nuttx \
 		   -DNNG_PLATFORM_POSIX \
 		   -DNNG_SETSTACKSIZE \
 		   -DNNG_HAVE_EVENTFD \
@@ -69,9 +69,10 @@ CFLAGS +=  -DNNG_HAVE_STRLCPY \
 
 
 ALL_SUBDIR = src \
+             src/core \
+			 src/nuttx \
              src/supplemental/util \
 			 src/supplemental/tls \
-             src/core \
 			 src/platform/posix
 
 cflags.NNG_PROTOCOL_PAIR := src/protocol/pair0 src/protocol/pair1
@@ -98,7 +99,6 @@ ALL_SUBDIR += $(foreach flag, $(shell echo $(CONFIG_NNG_DEFINES)), ${cflags.${fl
 CSRCS = $(shell find $(ALL_SUBDIR) -name "*.c" -a ! -name "*_test.c" -maxdepth 1)
 
 ifeq ($(CONFIG_NNG_DEMO),y)
-CSRCS += demo/nuttx/nxipc.c
 MAINSRC = demo/nuttx/nuttx_media.c
 endif
 
