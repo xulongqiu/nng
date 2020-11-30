@@ -1,10 +1,24 @@
+/*
+ * Copyright (c) 2020 xiaomi.
+ *
+ * Unpublished copyright. All rights reserved. This material contains
+ * proprietary information that should be used or copied only within
+ * xiaomi, except with written permission of xiaomi.
+ *
+ * @file:    pubsub.c
+ * @brief:
+ * @author:  xulongqiu@xiaomi.com
+ * @version: 1.0
+ * @date:    2020-11-30 23:32:51
+ */
+
 #include <string.h>
-#include <time.h>
+#include <unistd.h>
 #include <sys/time.h>
 #include <sys/prctl.h>
 #include <pthread.h>
 
-#include "nxipc.h"
+#include "../../src/nuttx/nxipc.h"
 
 #define CLIENT_WORKERS_MAX 5
 
@@ -39,23 +53,28 @@ static uint64_t milliseconds(void)
 static void* pub_worker(void* arg)
 {
     int cnt = 5;
+    nxparcel* parcel;
     //pthread_detach(pthread_self()); //pthread_join()
     prctl(PR_SET_NAME, "pub_worker", NULL, NULL, NULL);
-
+    nxparcel_alloc(&parcel);
     while (cnt-- > 0) {
         for(int i = 0; i < sizeof(g_sub_test) / sizeof(g_sub_test[0]); i++) {
-            nxipc_pub_topic_msg(arg, g_sub_test[i].name, strlen(g_sub_test[i].name), g_sub_test[i].name, strlen(g_sub_test[i].name));
+            if (parcel != NULL) {
+                nxparcel_clear(parcel);
+                nxparcel_append(parcel, g_sub_test[i].name, strlen(g_sub_test[i].name) + 1);
+            }
+            nxipc_pub_topic_msg(arg, g_sub_test[i].name, strlen(g_sub_test[i].name), parcel);
         }
         sleep(2);
     }
-
+    nxparcel_free(parcel);
 
     return NULL;
 }
 
-static int local_sub_listener(const void* thiz, const void* topic, const size_t topic_len, const void* content, const size_t content_len) {
+static int local_sub_listener(const void* thiz, const void* topic, const size_t topic_len, const nxparcel* parcel) {
     ps_sub_test_t* test = (ps_sub_test_t*)thiz;
-    fprintf(stderr, "%s.%s.listener.topic=%s\n", __func__, test->name, (char*)topic);
+    fprintf(stderr, "%s.%s.listener.topic=%s, content=%s\n", __func__, test->name, (char*)topic, (char*)nxparcel_data(parcel));
 }
 
 int client(const char* url, const char* name)

@@ -5,19 +5,16 @@
  * proprietary information that should be used or copied only within
  * xiaomi, except with written permission of xiaomi.
  *
- * @file:    nng_nuttx.c
+ * @file:    nxipc.c
  * @brief:
  * @author:  xulongqiu@xiaomi.com
  * @version: 1.0
- * @date:    2020-11-18 13:21:27
+ * @date:    2020-11-30 13:38:44
  */
 
 #include <string.h>
 #include <time.h>
-#include <poll.h>
 #include <sys/time.h>
-#include <pthread.h>
-#include <sys/prctl.h>
 #include <nng/nng.h>
 #include <nng/compat/nanomsg/nn.h>
 #include <nng/protocol/reqrep0/req.h>
@@ -28,13 +25,8 @@
 #include "nxipc.h"
 
 #define NNG_NUTTX_TOPIC_NAME_LEN 15
-
-typedef struct nng_trans_hdr {
-    int seq;
-    int op_code;
-    size_t len;
-    unsigned char* data[];
-} nng_trans_hdr_t;
+#define NNG_NUTTX_SEND_TIMEOUT_MS 200
+#define NNG_NUTTX_RECV_TIMEOUT_MS 200
 
 typedef enum {
     NNG_NUTTX_MODE_REQREP = 0,
@@ -52,12 +44,27 @@ typedef enum {
     NNG_NUTTX_TRANS_TYPE_MAX
 } nng_nuttx_trans_type_t;
 
+typedef enum {
+    NNG_NUTTX_INIT_RECV,
+    NNG_NUTTX_RECV_RET_SEND,
+    NNG_NUTTX_SEND_RET_RECV,
+    NNG_NUTTX_RECV_RET_RECV,
+} nng_nuttx_aio_state_t;
+
+typedef struct nng_trans_hdr {
+    int seq;
+    int op_code;
+    size_t len;
+    unsigned char* data[];
+} nng_trans_hdr_t;
+
 typedef struct nng_server_ctx {
+    nng_nuttx_aio_state_t state;
     char* name;
     nng_socket fd;
+    nng_aio* aio;
+    nng_ctx  nng;
     on_transaction on_trans_cb;
-    pthread_t tid;
-    bool actived;
     void* priv;
 } nng_server_ctx_t;
 
@@ -72,11 +79,12 @@ typedef struct nng_pub_ctx {
 } nng_pub_ctx_t;
 
 typedef struct nng_sub_ctx {
+    nng_nuttx_aio_state_t state;
     char* name;
     nng_socket fd;
+    nng_aio* aio;
+    nng_ctx  nng;
     on_topic_listener listener;
-    pthread_t tid;
-    bool actived;
     void* priv;
 } nng_sub_ctx_t;
 
@@ -86,103 +94,112 @@ typedef struct nng_nuttx_topic {
     uint8_t content[];
 } nng_nuttx_topic_t;
 
+
 const char* const nng_nuttx_trans_prefix_str[] = {
     "inproc://", "ipc://", "tcp://"
 };
 
 #define nxipc_log(fmt, args...)  do { fprintf(stderr, fmt, ## args); } while(0)
 
-static void* nng_server_worker(void* arg)
+static inline void* nxipc_calloc(size_t size)
 {
-    nng_trans_hdr_t* trans_hdr;
-    nxipc_trans_data_t trans_data;
+    return calloc(1, size);
+}
+
+static inline void nxipc_free(void* ptr)
+{
+    free(ptr);
+}
+
+static void nng_server_worker(void* arg)
+{
+    int ret = 0;
     nng_server_ctx_t* ctx = (nng_server_ctx_t*)arg;
 
     if (NULL == ctx) {
-        return NULL;
+        return;
     }
 
-    prctl(PR_SET_NAME, strstr(ctx->name, "//") + 2, NULL, NULL, NULL);
+    switch (ctx->state) {
+    case NNG_NUTTX_INIT_RECV:
+        ctx->state = NNG_NUTTX_RECV_RET_SEND;
+        nng_ctx_recv(ctx->nng, ctx->aio);
+        break;
 
-    while (ctx->actived) {
-        int rc;
-        nng_msg* msg = NULL;
-        void* body   = NULL;
-        rc = nng_recvmsg(ctx->fd, &msg, 0);
+    case NNG_NUTTX_RECV_RET_SEND: {
+        nng_msg* msg;
+        nxparcel* parcel = NULL;
+        nng_trans_hdr_t* hdr;
+        uint32_t seq, op_code, len;
 
-        if (rc < 0) {
-            nxipc_log("%s: %s\n", __func__, nng_strerror(rc));
-
-            if (rc == EBADF) {
-                break;   /* Socket closed by another thread. */
+        if ((ret = nng_aio_result(ctx->aio)) != 0) {
+            if (ret == NNG_ETIMEDOUT) {
+                nng_ctx_recv(ctx->nng, ctx->aio);
             } else {
-                //TODO timeout or others
-                break;
-            }
-        }
-
-        if (msg == NULL) {
-            if (!ctx->actived) {
-                nxipc_log("%s: msg=null, actived=false\n", __func__);
+                nxipc_log("%s: nng_aio_result.error=%d(%s)\n", __func__, ret, nng_strerror(ret));
             }
 
-            continue;
+            break;
         }
 
-        body = nng_msg_body(msg);
-        trans_hdr = (nng_trans_hdr_t*)body;
-        rc = nng_msg_len(msg);
+        msg = nng_aio_get_msg(ctx->aio);
 
-        if (rc < trans_hdr->len + sizeof(nng_trans_hdr_t)) {
-            continue;
+        if (msg == NULL || nng_msg_body(msg) == NULL) {
+            nng_ctx_recv(ctx->nng, ctx->aio);
+            break;
+        }
+
+        // parse & execute
+        hdr = (nng_trans_hdr_t*)nng_msg_body(msg);
+        ret = nng_msg_trim(msg, sizeof(nng_trans_hdr_t));
+
+        if (ret != 0 || nng_msg_len(msg) != hdr->len) {
+            hdr->op_code = -EINVAL;
         } else {
             if (ctx->on_trans_cb != NULL) {
-                trans_data.in = body + sizeof(nng_trans_hdr_t);
-                trans_data.in_size = trans_hdr->len;
-                trans_hdr->op_code = ctx->on_trans_cb(ctx->priv, trans_hdr->op_code, &trans_data);
+                hdr->op_code = ctx->on_trans_cb(ctx->priv, hdr->op_code, msg, &parcel);
             } else {
-                trans_hdr->op_code = 0;
+                hdr->op_code = -EINVAL;
             }
-
-            trans_hdr->len = 0;
         }
 
         // send response
-        {
-            nng_trans_hdr_t* send_hdr = trans_hdr;
-            send_hdr->len = 0;
+        nng_msg_clear(msg);
+        ret = nng_msg_append(msg, hdr, sizeof(nng_trans_hdr_t));
 
-            nng_msg_clear(msg);
-            rc = nng_msg_append(msg, send_hdr, sizeof(nng_trans_hdr_t));
+        if (ret == 0) {
+            hdr = (nng_trans_hdr_t*)nng_msg_body(msg);
 
-            if (rc != 0) {
-                nxipc_log("%s-%d: rc=%d\n", __func__, __LINE__, rc);
-            } else if (trans_data.out_size > 0 && trans_data.out != NULL) {
-                rc = nng_msg_append(msg, trans_data.out, trans_data.out_size);
-
-                if (rc != 0) {
-                    send_hdr->op_code = -ENOMEM;
-                    send_hdr->len = 0;
-                } else {
-                    send_hdr->len = trans_data.out_size;
-                }
-            }
-
-            rc = nng_sendmsg(ctx->fd, msg, 0);
-
-            if (rc < 0) {
-                nxipc_log("%s: %s\n", __func__, nng_strerror(rc));
-            }
-
-            if (trans_data.out != NULL) {
-                free(trans_data.out);
-                trans_data.out = NULL;
-                trans_data.out_size = 0;
+            if (parcel != NULL && (hdr->len = nng_msg_len(parcel)) > 0) {
+                nng_msg_append(msg, nng_msg_body(parcel), hdr->len);
+                nng_msg_free(parcel);
+            } else {
+                hdr->len = 0;
             }
         }
+
+        ctx->state = NNG_NUTTX_SEND_RET_RECV;
+        nng_aio_set_msg(ctx->aio, msg);
+        nng_ctx_send(ctx->nng, ctx->aio);
+    }
+    break;
+
+    case NNG_NUTTX_SEND_RET_RECV:
+        if ((ret = nng_aio_result(ctx->aio)) != 0) {
+            nng_msg_free(nng_aio_get_msg(ctx->aio));
+            nxipc_log("%s: nng_aio_result=%d", __func__, ret);
+        }
+
+        ctx->state = NNG_NUTTX_RECV_RET_SEND;
+        nng_ctx_recv(ctx->nng, ctx->aio);
+        break;
+
+    default:
+        nxipc_log("%s: bad state %d", __func__, ctx->state);
+        break;
     }
 
-    return NULL;
+    return;
 }
 
 void* nxipc_server_create(const char* name)
@@ -197,14 +214,16 @@ void* nxipc_server_create(const char* name)
         goto err;
     }
 
-    ctx = calloc(1, sizeof(nng_server_ctx_t));
+    ctx = nxipc_calloc(sizeof(nng_server_ctx_t));
 
     if (ctx == NULL) {
         ret = -ENOMEM;
         goto err;
     }
 
-    ctx->name = calloc(1, strlen(nng_nuttx_trans_prefix_str[trans_type]) + name_len + 1);
+    memset(ctx, 0, sizeof(nng_server_ctx_t));
+
+    ctx->name = nxipc_calloc(strlen(nng_nuttx_trans_prefix_str[trans_type]) + name_len + 1);
 
     if (ctx->name == NULL) {
         ret = -ENOMEM;
@@ -222,15 +241,21 @@ void* nxipc_server_create(const char* name)
         goto err;
     }
 
-    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, 100);
-    nng_setopt_ms(ctx->fd, NNG_OPT_SENDTIMEO, 100);
+    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, NNG_NUTTX_RECV_TIMEOUT_MS);
+    nng_setopt_ms(ctx->fd, NNG_OPT_SENDTIMEO, NNG_NUTTX_SEND_TIMEOUT_MS);
 
-    ctx->actived = true;
-    ret = pthread_create(&ctx->tid, NULL, nng_server_worker, (void*)ctx);
-
-    if (0 == ret) {
-        return ctx;
+    if ((ret = nng_aio_alloc(&ctx->aio, nng_server_worker, ctx)) != 0) {
+        goto err;
     }
+
+    if ((ret = nng_ctx_open(&ctx->nng, ctx->fd)) != 0) {
+        goto err;
+    }
+
+    ctx->state = NNG_NUTTX_INIT_RECV;
+    nng_server_worker(ctx);
+
+    return ctx;
 
 err:
     nxipc_log("%s.ret=%d(%s)\n", __func__, ret, nng_strerror(ret));
@@ -239,10 +264,10 @@ err:
         nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
-            free(ctx->name);
+            nxipc_free(ctx->name);
         }
 
-        free(ctx);
+        nxipc_free(ctx);
     }
 
     return NULL;
@@ -261,16 +286,18 @@ int nxipc_server_release(void* nng_server_ctx)
 {
     if (nng_server_ctx != NULL) {
         nng_server_ctx_t* ctx = (nng_server_ctx_t*)nng_server_ctx;
-        ctx->actived = false;
-        pthread_join(ctx->tid, NULL);
+        nng_aio_stop(ctx->aio);
+        nng_aio_wait(ctx->aio);
+        nng_ctx_close(ctx->nng);
+        nng_aio_free(ctx->aio);
         nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
-            free(ctx->name);
+            nxipc_free(ctx->name);
             ctx->name = NULL;
         }
 
-        free(ctx);
+        nxipc_free(ctx);
     }
 }
 
@@ -287,14 +314,16 @@ void* nxipc_client_connect(const char* server_name)
         goto err;
     }
 
-    ctx = calloc(1, sizeof(nng_server_ctx_t));
+    ctx = nxipc_calloc(sizeof(nng_server_ctx_t));
 
     if (ctx == NULL) {
         ret = -ENOMEM;
         goto err;
     }
 
-    ctx->name = calloc(1, strlen(nng_nuttx_trans_prefix_str[trans_type]) + name_len + 1);
+    memset(ctx, 0, sizeof(nng_server_ctx_t));
+
+    ctx->name = nxipc_calloc(strlen(nng_nuttx_trans_prefix_str[trans_type]) + name_len + 1);
 
     if (ctx->name == NULL) {
         ret = -ENOMEM;
@@ -312,8 +341,8 @@ void* nxipc_client_connect(const char* server_name)
         goto err;
     }
 
-    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, 100);
-    nng_setopt_ms(ctx->fd, NNG_OPT_SENDTIMEO, 100);
+    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, NNG_NUTTX_RECV_TIMEOUT_MS);
+    nng_setopt_ms(ctx->fd, NNG_OPT_SENDTIMEO, NNG_NUTTX_SEND_TIMEOUT_MS);
 
     return ctx;
 
@@ -324,10 +353,10 @@ err:
         nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
-            free(ctx->name);
+            nxipc_free(ctx->name);
         }
 
-        free(ctx);
+        nxipc_free(ctx);
     }
 
     return NULL;
@@ -339,21 +368,21 @@ int nxipc_client_disconnect(void* nng_client_ctx)
         nng_client_ctx_t* ctx = (nng_client_ctx_t*)nng_client_ctx;
 
         if (ctx->name != NULL) {
-            free(ctx->name);
+            nxipc_free(ctx->name);
             ctx->name = NULL;
         }
 
         nng_close(ctx->fd);
-        free(ctx);
+        nxipc_free(ctx);
     }
 }
 
-int nxipc_client_transaction(const void* nng_client_ctx, int op_code, const void* in, int in_len, void* out, int out_len)
+int nxipc_client_transaction(const void* nng_client_ctx, int op_code, \
+                             const nxparcel* in, nxparcel* out)
 {
     int ret = 0;
     nng_msg* msg;
-    uint8_t* body = NULL;
-    nng_trans_hdr_t* trans_hdr = NULL;
+    nng_trans_hdr_t* hdr;
     nng_client_ctx_t* ctx = (nng_client_ctx_t*)nng_client_ctx;
 
     if (NULL == ctx) {
@@ -368,12 +397,13 @@ int nxipc_client_transaction(const void* nng_client_ctx, int op_code, const void
         goto out;
     }
 
-    trans_hdr = nng_msg_body(msg);
-    trans_hdr->len = in_len;
-    trans_hdr->op_code = op_code;
+    hdr = (nng_trans_hdr_t*)nng_msg_body(msg);
+    hdr->seq = 0;
+    hdr->op_code = op_code;
+    hdr->len = 0;
 
-    if (in != NULL && in_len > 0) {
-        nng_msg_append(msg, in, in_len);
+    if (in != NULL && (hdr->len = nng_msg_len(in)) > 0) {
+        nng_msg_append(msg, nng_msg_body((nng_msg*)in), hdr->len);
     }
 
     ret = nng_sendmsg(ctx->fd, msg, 0);
@@ -385,24 +415,18 @@ int nxipc_client_transaction(const void* nng_client_ctx, int op_code, const void
 
     ret = nng_recvmsg(ctx->fd, &msg, 0);
 
-    if (ret < 0 || msg == NULL) {
+    if (ret < 0 || msg == NULL || nng_msg_body(msg) == NULL) {
         nxipc_log("client_recv.ret=%s, msg=%p\n", nng_strerror(ret), msg);
         goto out;
     }
 
-    ret = nng_msg_len(msg);
-    body = nng_msg_body(msg);
+    hdr = (nng_trans_hdr_t*)nng_msg_body(msg);
+    ret = nng_msg_trim(msg, sizeof(nng_trans_hdr_t));
 
-    if (ret < sizeof(nng_trans_hdr_t)) {
-        ret = -EINVAL;
-    } else {
-        trans_hdr = (nng_trans_hdr_t*)body;
-
-        if (out != NULL && out_len > 0 && ret > sizeof(nng_trans_hdr_t)) {
-            memcpy(out, body + sizeof(nng_trans_hdr_t), out_len > trans_hdr->len ? trans_hdr->len : out_len);
+    if (ret == 0 && hdr->len == nng_msg_len(msg)) {
+        if (hdr->len > 0 && out != NULL) {
+            nng_msg_append(out, nng_msg_body(msg), hdr->len);
         }
-
-        ret = trans_hdr->op_code;
     }
 
 out:
@@ -423,14 +447,16 @@ void* nxipc_pub_create(const char* name)
         goto err;
     }
 
-    ctx = calloc(1, sizeof(nng_server_ctx_t));
+    ctx = nxipc_calloc(sizeof(nng_server_ctx_t));
 
     if (ctx == NULL) {
         ret = -ENOMEM;
         goto err;
     }
 
-    ctx->name = calloc(1, strlen(nng_nuttx_trans_prefix_str[trans_type]) + name_len + 1);
+    memset(ctx, 0, sizeof(nng_server_ctx_t));
+
+    ctx->name = nxipc_calloc(strlen(nng_nuttx_trans_prefix_str[trans_type]) + name_len + 1);
 
     if (ctx->name == NULL) {
         ret = -ENOMEM;
@@ -456,10 +482,10 @@ err:
         nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
-            free(ctx->name);
+            nxipc_free(ctx->name);
         }
 
-        free(ctx);
+        nxipc_free(ctx);
     }
 
     return NULL;
@@ -473,17 +499,15 @@ int nxipc_pub_release(void* nng_pub_ctx)
         nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
-            free(ctx->name);
+            nxipc_free(ctx->name);
             ctx->name = NULL;
         }
 
-        free(ctx);
+        nxipc_free(ctx);
     }
 }
 
-
-
-int nxipc_pub_topic_msg(void* nng_pub_ctx, const void* topic, size_t topic_len, const void* content, size_t content_len)
+int nxipc_pub_topic_msg(void* nng_pub_ctx, const void* topic, size_t topic_len, const nxparcel* parcel)
 {
     int ret = 0;
     int send_len = 0;
@@ -504,71 +528,79 @@ int nxipc_pub_topic_msg(void* nng_pub_ctx, const void* topic, size_t topic_len, 
     }
 
     memcpy(topic_data->topic, topic, topic_len > NNG_NUTTX_TOPIC_NAME_LEN ? NNG_NUTTX_TOPIC_NAME_LEN : topic_len);
-    topic_data->content_len = content_len;
-    nng_msg_append(msg, content, content_len);
+
+    if (parcel != NULL) {
+        topic_data->content_len = nng_msg_len(parcel);
+        nng_msg_append(msg, nng_msg_body((nng_msg*)parcel), topic_data->content_len);
+    } else {
+        topic_data->content_len = 0;
+    }
+
     ret = nng_sendmsg(ctx->fd, msg, 0);
 
     if (ret != 0) {
+        nng_msg_free(msg);
         nxipc_log("%s.ret=%d, send_len=%d\n", __func__, ret, send_len);
-        return -1;
     }
 
     return ret;
 }
 
-static void* nng_sub_worker(void* arg)
+static void nng_sub_worker(void* arg)
 {
+    int ret;
+    nng_msg* msg = NULL;
+    nng_nuttx_topic_t* topic;
     nng_sub_ctx_t* ctx = (nng_sub_ctx_t*)arg;
 
     if (NULL == ctx) {
-        return NULL;
+        return;
     }
 
-    prctl(PR_SET_NAME, strstr(ctx->name, "//") + 2, NULL, NULL, NULL);
+    switch (ctx->state) {
+    case NNG_NUTTX_INIT_RECV:
+        ctx->state = NNG_NUTTX_RECV_RET_RECV;
+        nng_ctx_recv(ctx->nng, ctx->aio);
+        break;
 
-    while (ctx->actived) {
-        int rc;
-        nng_msg* msg = NULL;
-        nng_nuttx_topic_t* topic;
-
-        rc = nng_recvmsg(ctx->fd, &msg, 0);
-
-        if (rc < 0) {
-            nxipc_log("%s: %s\n", __func__, nng_strerror(rc));
-
-            if (rc == EBADF) {
-                break;   /* Socket closed by another thread. */
+    case NNG_NUTTX_RECV_RET_RECV:
+        if ((ret = nng_aio_result(ctx->aio)) != 0) {
+            if (ret == NNG_ETIMEDOUT) {
+                nng_ctx_recv(ctx->nng, ctx->aio);
             } else {
-                //TODO timeout or others
-                break;
+                nxipc_log("%s: nng_aio_result.error=%d(%s)\n", __func__, ret, nng_strerror(ret));
             }
+
+            break;
         }
 
-        if (msg == NULL) {
-            if (!ctx->actived) {
-                nxipc_log("%s: msg=null, actived=false\n", __func__);
-            }
+        msg = nng_aio_get_msg(ctx->aio);
 
-            continue;
+        if (msg == NULL || nng_msg_body(msg) == NULL) {
+            nng_ctx_recv(ctx->nng, ctx->aio);
+            break;
         }
 
         topic = (nng_nuttx_topic_t*)nng_msg_body(msg);
-        rc = nng_msg_len(msg);
+        nng_msg_trim(msg, sizeof(nng_nuttx_topic_t));
+        ret = nng_msg_len(msg);
 
-        if (rc < sizeof(nng_nuttx_topic_t) + topic->content_len) {
-            nxipc_log("%s.content_len=%lu, rc=%d\n", __func__, topic->content_len, rc);
-            nng_msg_free(msg);
-            continue;
-        } else {
-            if (ctx->listener != NULL) {
-                ctx->listener(ctx->priv, topic->topic, NNG_NUTTX_TOPIC_NAME_LEN, topic->content, topic->content_len);
-            }
+        if (ret != topic->content_len) {
+            nxipc_log("%s.content_len=%lu, rc=%d\n", __func__, topic->content_len, ret);
+        } else if (ctx->listener != NULL) {
+            ctx->listener(ctx->priv, topic->topic, NNG_NUTTX_TOPIC_NAME_LEN, msg);
         }
 
         nng_msg_free(msg);
+        nng_ctx_recv(ctx->nng, ctx->aio);
+        break;
+
+    default:
+        nxipc_log("%s: bad state %d", __func__, ctx->state);
+        break;
     }
 
-    return NULL;
+    return;
 }
 
 void* nxipc_sub_connect(const char* name, on_topic_listener listener, void* listener_priv)
@@ -583,14 +615,16 @@ void* nxipc_sub_connect(const char* name, on_topic_listener listener, void* list
         goto err;
     }
 
-    ctx = calloc(1, sizeof(nng_sub_ctx_t));
+    ctx = nxipc_calloc(sizeof(nng_sub_ctx_t));
 
     if (ctx == NULL) {
         ret = -ENOMEM;
         goto err;
     }
 
-    ctx->name = calloc(1, strlen(nng_nuttx_trans_prefix_str[trans_type]) + name_len + 1);
+    memset(ctx, 0, sizeof(nng_sub_ctx_t));
+
+    ctx->name = nxipc_calloc(strlen(nng_nuttx_trans_prefix_str[trans_type]) + name_len + 1);
 
     if (ctx->name == NULL) {
         ret = -ENOMEM;
@@ -608,21 +642,22 @@ void* nxipc_sub_connect(const char* name, on_topic_listener listener, void* list
         goto err;
     }
 
-    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, 100);
+    nng_setopt_ms(ctx->fd, NNG_OPT_RECVTIMEO, NNG_NUTTX_RECV_TIMEOUT_MS);
+    ctx->listener = listener;
+    ctx->priv = listener_priv;
 
-    if (ret < 0) {
+    if ((ret = nng_aio_alloc(&ctx->aio, nng_sub_worker, ctx)) != 0) {
         goto err;
     }
 
-    ctx->listener = listener;
-    ctx->priv = listener_priv;
-    ctx->actived = true;
-    ret = pthread_create(&ctx->tid, NULL, nng_sub_worker, (void*)ctx);
-
-    if (0 == ret) {
-        return ctx;
+    if ((ret = nng_ctx_open(&ctx->nng, ctx->fd)) != 0) {
+        goto err;
     }
 
+    ctx->state = NNG_NUTTX_INIT_RECV;
+    nng_sub_worker(ctx);
+
+    return ctx;
 err:
     nxipc_log("%s.ret=%d(%s)\n", __func__, ret, nng_strerror(ret));
 
@@ -630,10 +665,10 @@ err:
         nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
-            free(ctx->name);
+            nxipc_free(ctx->name);
         }
 
-        free(ctx);
+        nxipc_free(ctx);
     }
 
     return NULL;
@@ -643,17 +678,19 @@ void nxipc_sub_disconnect(void* nng_sub_ctx)
 {
     if (nng_sub_ctx != NULL) {
         nng_sub_ctx_t* ctx = (nng_sub_ctx_t*)nng_sub_ctx;
-        ctx->actived = false;
 
-        pthread_join(ctx->tid, NULL);
+        nng_aio_stop(ctx->aio);
+        nng_aio_wait(ctx->aio);
+        nng_ctx_close(ctx->nng);
+        nng_aio_free(ctx->aio);
         nng_close(ctx->fd);
 
         if (ctx->name != NULL) {
-            free(ctx->name);
+            nxipc_free(ctx->name);
             ctx->name = NULL;
         }
 
-        free(ctx);
+        nxipc_free(ctx);
     }
 }
 
@@ -672,7 +709,7 @@ int nxipc_sub_register_topic(void* nng_sub_ctx, const void* topic, size_t topic_
         topic_len = NNG_NUTTX_TOPIC_NAME_LEN;
     }
 
-    ret = nng_setopt(ctx->fd, NNG_OPT_SUB_SUBSCRIBE, topic, topic_len);
+    ret  = nng_ctx_setopt(ctx->nng, NNG_OPT_SUB_SUBSCRIBE, topic, topic_len);
 
     if (ret < 0) {
         nxipc_log("%s.ret=%d(%s)\n", __func__, ret, nng_strerror(ret));
@@ -695,7 +732,7 @@ int nxipc_sub_unregister_topic(void* nng_sub_ctx, const void* topic, size_t topi
         topic_len = NNG_NUTTX_TOPIC_NAME_LEN;
     }
 
-    ret = nng_setopt(ctx->fd, NNG_OPT_SUB_UNSUBSCRIBE, topic, topic_len);
+    ret  = nng_ctx_setopt(ctx->nng, NNG_OPT_SUB_UNSUBSCRIBE, topic, topic_len);
 
     if (ret < 0) {
         nxipc_log("%s.ret=%d(%s)\n", __func__, ret, nng_strerror(ret));

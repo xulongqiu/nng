@@ -1,8 +1,22 @@
+/*
+ * Copyright (c) 2020 xiaomi.
+ *
+ * Unpublished copyright. All rights reserved. This material contains
+ * proprietary information that should be used or copied only within
+ * xiaomi, except with written permission of xiaomi.
+ *
+ * @file:    reqrep.c
+ * @brief:
+ * @author:  xulongqiu@xiaomi.com
+ * @version: 1.0
+ * @date:    2020-11-30 23:33:02
+ */
+
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
 
-#include "nxipc.h"
+#include "../../src/nuttx/nxipc.h"
 
 #define SERVER_WORKERS_MAX 1
 #define CLIENT_WORKERS_MAX 1
@@ -28,24 +42,25 @@ static uint64_t milliseconds(void)
 }
 
 
-static int media_server_on_transaction(const void* cookie, const int code, nxipc_trans_data_t* data)
+static int media_server_on_transaction(const void* cookie, const int code, const nxparcel* parcel, nxparcel** out)
 {
     int ret = 0;
 
     switch (code) {
     case CREATE:
-        if (data != NULL) {
-            fprintf(stdout, "media_server.create.name=%s\n", (char*)data->in);
-            data->out = malloc(strlen("created"));
-            memcpy(data->out, "created", strlen("created"));
-            data->out_size = strlen("created");
+        if (parcel != NULL) {
+            char* name = (char*)nxparcel_data(parcel);
+            fprintf(stderr, "media_server.create.name=%s\n", name);
+            nxparcel_alloc(out);
+            if (*out != NULL) {
+                nxparcel_append(*out, "created", strlen("created") + 1);
+            }
         }
-
         break;
 
     case SET_DATA_SOURCE:
-        if (data != NULL) {
-            fprintf(stdout, "media_server.set_data_source.url=%s\n", (char*)data->in);
+        if (parcel != NULL) {
+            fprintf(stdout, "media_server.set_data_source.url=%s\n", (char*)nxparcel_data(parcel));
         }
 
         break;
@@ -72,11 +87,9 @@ static int media_server_on_transaction(const void* cookie, const int code, nxipc
 
     case ISPLAYING:
         fprintf(stdout, "media_server.isplaying\n");
-
-        if (data != NULL) {
-            data->out = malloc(sizeof(int));
-            *(int*)data->out = 1;
-            data->out_size = sizeof(int);
+        nxparcel_alloc(out);
+        if (*out != NULL) {
+            nxparcel_append_u32(*out, -1);
         }
 
         break;
@@ -94,40 +107,46 @@ int client(const char* url, const char* name)
     void* client = nxipc_client_connect(url);
 
     if (client != NULL) {
-        char out[15] = {0};
+        nxparcel* parcel;
         int  is_playing = 0;
         fprintf(stderr, "client connected.\n");
-        rc = nxipc_client_transaction(client, CREATE, name, strlen(name) + 1, out, sizeof(out));
+        nxparcel_alloc(&parcel);
+        nxparcel_append(parcel, name, strlen(name) + 1);
+        rc = nxipc_client_transaction(client, CREATE, parcel, parcel);
 
         if (rc != 0) {
             fprintf(stdout, "player.name=%s, create.error=%d\n", name, rc);
         } else {
-            fprintf(stdout, "player.name=%s, create.out=%s\n", name, out);
+            nxparcel_skip(parcel, (size_t)(strlen(name) + 1));
+            fprintf(stdout, "player.name=%s, create.out=%s\n", name, (char*)nxparcel_data(parcel));
         }
-
-        rc = nxipc_client_transaction(client, SET_DATA_SOURCE, "http://253.mp3", strlen("http://253.mp3"), NULL, 0);
+        nxparcel_clear(parcel);
+        nxparcel_append(parcel, "http://253.mp3", strlen("http://253.mp3") + 1);
+        rc = nxipc_client_transaction(client, SET_DATA_SOURCE, parcel, NULL);
 
         if (rc != 0) {
             fprintf(stdout, "player.name=%s, set_data_source.error=%d\n", name, rc);
         }
 
-        rc = nxipc_client_transaction(client, PREPARE, NULL, 0, NULL, 0);
+        rc = nxipc_client_transaction(client, PREPARE, NULL, NULL);
 
         if (rc != 0) {
             fprintf(stdout, "player.name=%s, prepare.error=%d\n", name, rc);
         }
 
-        rc = nxipc_client_transaction(client, START, NULL, 0, NULL, 0);
+        rc = nxipc_client_transaction(client, START, NULL, NULL);
 
         if (rc != 0) {
             fprintf(stdout, "player.name=%s, start.error=%d\n", name, rc);
         }
 
-        rc = nxipc_client_transaction(client, ISPLAYING, NULL, 0, &is_playing, sizeof(is_playing));
+        nxparcel_clear(parcel);
+        rc = nxipc_client_transaction(client, ISPLAYING, NULL, parcel);
 
         if (rc != 0) {
             fprintf(stdout, "player.name=%s, isplaying.error=%d\n", name, rc);
         } else {
+            nxparcel_read_u32(parcel, &is_playing);
             fprintf(stdout, "player.name=%s, isplaying=%d\n", name, is_playing);
         }
     }

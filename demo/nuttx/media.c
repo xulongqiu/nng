@@ -1,3 +1,17 @@
+/*
+ * Copyright (c) 2020 xiaomi.
+ *
+ * Unpublished copyright. All rights reserved. This material contains
+ * proprietary information that should be used or copied only within
+ * xiaomi, except with written permission of xiaomi.
+ *
+ * @file:    media.c
+ * @brief:
+ * @author:  xulongqiu@xiaomi.com
+ * @version: 1.0
+ * @date:    2020-11-30 23:32:40
+ */
+
 #include <unistd.h>
 #include <string.h>
 #include <time.h>
@@ -5,7 +19,7 @@
 #include <sys/prctl.h>
 #include <pthread.h>
 
-#include "nxipc.h"
+#include "../../src/nuttx/nxipc.h"
 
 #define SERVER_WORKERS_MAX 1
 #define CLIENT_WORKERS_MAX 1
@@ -67,19 +81,25 @@ static uint64_t milliseconds(void)
 
 
 static void media_server_player_notify_info(media_server_ctx_t* ctx, media_player_ctx_t* player) {
+    nxparcel* parcel;
     player_info_t info = {
         .cmd = 1,
         .arg1 = 2,
         .arg2 = 3
     };
-    nxipc_pub_topic_msg(ctx->notifier, player->name, strlen(player->name), &info, sizeof(info));
+    nxparcel_alloc(&parcel);
+    if (parcel != NULL) {
+        nxparcel_append(parcel, &info, sizeof(player_info_t));
+    }
+    nxipc_pub_topic_msg(ctx->notifier, player->name, strlen(player->name), parcel);
+    nxparcel_free(parcel);
 }
 
 static void* media_server_worker(void* arg)
 {
     int cnt = 0;
     media_server_ctx_t* ctx = (media_server_ctx_t*)arg;
-    //pthread_detach(pthread_self()); //pthread_join()
+
     prctl(PR_SET_NAME, "pub_worker", NULL, NULL, NULL);
 
     if (ctx == NULL) {
@@ -121,27 +141,29 @@ static void* media_server_player_create(media_server_ctx_t* ctx, const char* nam
     return player;
 }
 
-static int media_server_on_transaction(const void* cookie, const int code, nxipc_trans_data_t* data)
+static int media_server_on_transaction(const void* cookie, const int code, const nxparcel* parcel, nxparcel** out)
 {
     int ret = 0;
 
     switch (code) {
     case CREATE:
-        if (data != NULL) {
-            media_log("media_server.create.name=%s\n", (char*)data->in);
-            void* player = media_server_player_create((media_server_ctx_t*)cookie, data->in);
+        if (parcel != NULL) {
+            char* name = (char*)nxparcel_data(parcel);
+            void* player = media_server_player_create((media_server_ctx_t*)cookie, name);
+            media_log("media_server.create.name=%s, player=%p\n", name, player);
             if (player != NULL) {
-                data->out = malloc(sizeof(void*));
-                memcpy(data->out, &player, sizeof(void*));
-                data->out_size = sizeof(void*);
+                nxparcel_alloc(out);
+                if (*out != NULL) {
+                    nxparcel_append(*out, &player, sizeof(void*));
+                }
             }
         }
 
         break;
 
     case SET_DATA_SOURCE:
-        if (data != NULL) {
-            media_log("media_server.set_data_source.url=%s\n", (char*)data->in);
+        if (parcel != NULL && nxparcel_size(parcel) > 0) {
+            media_log("media_server.set_data_source.url=%s\n", (char*)nxparcel_data(parcel));
         }
 
         break;
@@ -153,12 +175,12 @@ static int media_server_on_transaction(const void* cookie, const int code, nxipc
     return ret;
 }
 
-static int media_player_listener(const void* thiz, const void* topic, const size_t topic_len, const void* content, const size_t content_len) {
+static int media_player_listener(const void* thiz, const void* topic, const size_t topic_len, const nxparcel* parcel) {
     player_t* player = (player_t*)thiz;
-    player_info_t* info = (player_info_t*)content;
+    player_info_t* info = (player_info_t*)nxparcel_data(parcel);
     if (strncmp(player->name, (char*)topic, sizeof(player->name) != 0)) {
         media_log("%s.player=%s, topic=%s\n", __func__, player->name, (char*)topic);
-    } else {
+    } else if (info != NULL){
         media_log("%s.%s.topic=%s, .cmd=%d, .arg1=%d, .arg2=%d\n", __func__, player->name, (char*)topic, info->cmd, info->arg1, info->arg2);
     }
 }
@@ -173,17 +195,34 @@ static inline void* get_media_server_cb_proxy(player_t* player) {
 
 static void media_player_create(player_t* player) {
     void* handle = NULL;
+    nxparcel* parcel = NULL;
+
     player->server_proxy = get_media_server_proxy();
     player->cb_proxy = get_media_server_cb_proxy(player);
     nxipc_sub_register_topic(player->cb_proxy, player->name, strlen(player->name));
-    media_log("%s.name=%s\n", __func__, player->name);
-    nxipc_client_transaction(player->server_proxy, CREATE, player->name, strlen(player->name) + 1, &handle, sizeof(handle));
-    player->handle = handle;
+
+    nxparcel_alloc(&parcel);
+    nxparcel_append(parcel, player->name, strlen(player->name) + 1);
+
+    nxipc_client_transaction(player->server_proxy, CREATE, parcel, parcel);
+
+    nxparcel_skip(parcel, strlen(player->name) + 1);
+    player->handle = nxparcel_data(parcel);
+
+    media_log("%s.name=%s, player=%p\n", __func__, player->name, player->handle);
+    nxparcel_free(parcel);
     return;
 }
 
 static int media_player_set_data_source(player_t *player, const char* url) {
-    int rc = nxipc_client_transaction(player->server_proxy, SET_DATA_SOURCE, url, strlen(url) + 1, NULL, 0);
+    nxparcel* parcel = NULL;
+    nxparcel_alloc(&parcel);
+    if (parcel != NULL) {
+        nxparcel_append(parcel, url, strlen(url) + 1);
+    }
+    int rc = nxipc_client_transaction(player->server_proxy, SET_DATA_SOURCE, parcel, NULL);
+    nxparcel_free(parcel);
+    return rc;
 }
 
 static void* player_worker(void* arg) {
@@ -269,7 +308,8 @@ int media_server_stop(media_server_ctx_t *ctx) {
 }
 
 static void inline usage(const char* progname) {
-    printf("Usage: %s -t seconds -i interval_ms -r reqrep_mode -p subpub_mode -h help\n", progname);
+    printf("Usage: %s -t seconds -i interval_ms -r reqrep_mode -p subpub_mode -v log_verbose -h help\n", progname);
+    printf("Usage: %s -t 10 -i 1000000 -r -p -v\n", progname);
 }
 
 int main(int argc, char* const argv[])
@@ -312,6 +352,12 @@ int main(int argc, char* const argv[])
             return 0;
         }
     }
+
+    if (!reqrep && !pubsub) {
+        usage(argv[0]);
+        return 0;
+    }
+
     // player init
     memset(player, 0, sizeof(player));
     player[2].name = "wakeup";
