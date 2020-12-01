@@ -99,7 +99,7 @@ ALL_SUBDIR += $(foreach flag, $(shell echo $(CONFIG_NNG_DEFINES)), ${cflags.${fl
 CSRCS = $(shell find $(ALL_SUBDIR) -name "*.c" -a ! -name "*_test.c" -maxdepth 1)
 
 ifeq ($(CONFIG_NNG_DEMO),y)
-MAINSRC = demo/nuttx/nuttx_media.c
+MAINSRC = demo/nuttx/reqrep.c
 endif
 
 include $(APPDIR)/Application.mk
